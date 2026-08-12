@@ -13,6 +13,8 @@ import math
 import os
 import re
 import time
+import urllib.error
+import urllib.request
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -266,6 +268,52 @@ class OpenAIGenerator:
         return answer
 
 
+class OllamaGenerator:
+    """Generator backed by a locally running Ollama server."""
+
+    def __init__(self, max_output_tokens: int = 300) -> None:
+        self.host = os.getenv("OLLAMA_HOST", "http://localhost:11434").strip().rstrip("/")
+        self.model = os.getenv("OLLAMA_MODEL", "").strip()
+        if not self.model:
+            raise RuntimeError("OLLAMA_MODEL is missing from .env")
+        self.max_output_tokens = max_output_tokens
+
+    def generate(self, prompt: str) -> str:
+        payload = json.dumps(
+            {
+                "model": self.model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0, "num_predict": self.max_output_tokens},
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.host}/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f"Ollama request failed (is 'ollama serve' running at {self.host}?): {exc}"
+            ) from exc
+        answer = str(body.get("response", "")).strip()
+        if not answer:
+            raise RuntimeError("Ollama returned an empty answer")
+        return answer
+
+
+def _build_generator(backend: str) -> TextGenerator:
+    if backend == "ollama":
+        return OllamaGenerator()
+    if backend == "openai":
+        return OpenAIGenerator()
+    raise ValueError(f"Unknown generator backend: {backend}")
+
+
 @dataclass(frozen=True)
 class DomainResponse:
     question: str
@@ -489,15 +537,23 @@ def parse_args() -> argparse.Namespace:
         help="Output artifact (default: artifacts/actual_answers.json)",
     )
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument(
+        "--generator",
+        choices=["openai", "ollama"],
+        default=os.getenv("GENERATOR_BACKEND", "openai").strip() or "openai",
+        help="Answer-generation backend (default: env GENERATOR_BACKEND or openai)",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
+        generator = _build_generator(args.generator)
         artifact = generate_actual_answers(
             args.dataset,
             args.corpus_dir,
+            generator=generator,
             top_k=args.top_k,
             progress=lambda message: print(message, flush=True),
         )
