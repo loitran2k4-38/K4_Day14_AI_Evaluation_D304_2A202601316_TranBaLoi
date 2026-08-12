@@ -30,11 +30,11 @@ critical.
 
 | Metric | Acceptable Low Score Scenario | Critical Low Score Scenario | Action Required |
 |---|---|---|---|
-| Faithfulness | | | |
-| Answer Relevance | | | |
-| Context Recall | | | |
-| Context Precision | | | |
-| Completeness | | | |
+| Faithfulness | Answer diễn giải/tóm tắt lại context bằng từ ngữ khác nên overlap từ vựng thấp dù ý nghĩa vẫn đúng | Answer thêm thông tin không có trong context (giá, chính sách hoàn tiền, điều kiện bảo hành bịa ra) | Dưới 0.8: audit generation prompt, kiểm tra hallucination systematic, có thể cần thêm constraint "chỉ trả lời dựa trên context" |
+| Answer Relevance | Câu hỏi mơ hồ, có nhiều cách diễn giải hợp lệ nên answer lệch nhẹ khỏi trọng tâm | Answer lạc đề hoàn toàn, không giải quyết intent của khách hàng (hỏi A trả lời B) | Dưới 0.6: review lại question understanding / intent detection trong pipeline |
+| Context Recall | Câu hỏi cần tổng hợp nhiều docs, thiếu một chunk phụ không ảnh hưởng câu trả lời chính | Thiếu chunk chứa thông tin cốt lõi (vd điều kiện đổi trả), khiến answer chắc chắn sai hoặc thiếu | Dưới 0.6: investigate retriever — tăng top-K, cải thiện chunking hoặc embedding |
+| Context Precision | Có vài noise chunk ở cuối danh sách nhưng top-ranked chunk vẫn đúng | Chunk relevant xếp hạng thấp hoặc chunk đầu toàn irrelevant, khiến generation dựa trên context sai | Dưới 0.6: investigate ranking/reranking, kiểm tra query formulation |
+| Completeness | Answer thiếu chi tiết phụ, không ảnh hưởng đến việc giải quyết yêu cầu chính của khách hàng | Answer thiếu bước hoặc điều kiện bắt buộc (vd thiếu yêu cầu "cần hóa đơn" khi đổi trả) | Dưới 0.6: analyze failures — bổ sung instruction yêu cầu liệt kê đủ điều kiện/bước trong prompt |
 
 ### Exercise 1.2 — Bias trong LLM-as-a-Judge
 
@@ -46,15 +46,19 @@ Ba bias thường gặp:
 
 **Câu 1: Thiết kế experiment phát hiện position bias với ít nhất hai conditions.**
 
-> *Câu trả lời:*
+> *Câu trả lời:* Lấy cùng một cặp answer (A, B) cho cùng một câu hỏi, cho judge chấm ở hai conditions đảo vị trí:
+> - Condition 1: trình bày (A, B) — A đứng trước.
+> - Condition 2: trình bày (B, A) — B đứng trước.
+>
+> Lặp lại trên nhiều cặp câu hỏi/câu trả lời khác nhau, đo tỷ lệ judge chọn "answer đứng trước" ở cả hai conditions. Nếu tỷ lệ này lệch đáng kể khỏi 50% (và không phụ thuộc nội dung answer), tức là judge có position bias. Có thể mở rộng thêm condition 3: hai answer chất lượng ngang nhau (paraphrase của nhau) để cô lập ảnh hưởng của vị trí khỏi ảnh hưởng của nội dung.
 
 **Câu 2: Làm thế nào giảm verbosity bias bằng rubric design?**
 
-> *Câu trả lời:*
+> *Câu trả lời:* Viết rubric nêu rõ tiêu chí chấm là độ chính xác/mức độ đáp ứng intent, không phải độ dài — ví dụ ghi rõ "answer ngắn nhưng đủ ý vẫn đạt điểm tối đa; answer dài dòng, lặp ý không được cộng điểm". Kèm ví dụ cụ thể ở mỗi mức điểm cho thấy một answer ngắn có thể đạt 5đ và một answer dài có thể chỉ đạt 2đ nếu sai/lan man, để judge có anchor thay vì suy luận theo độ dài. Có thể thêm rule phạt trực tiếp: nội dung thừa không đóng góp thông tin mới bị trừ điểm ở dimension "Conciseness/Relevance".
 
 **Câu 3: Tại sao cần calibrate LLM judge với human labels?**
 
-> *Câu trả lời:*
+> *Câu trả lời:* Vì LLM judge có thể mang các bias hệ thống (position, verbosity, self-preference) hoặc đánh giá lệch chuẩn so với con người mà bản thân judge không tự nhận ra. Calibration là so sánh score của judge với score của human trên một tập mẫu (agreement rate, correlation), từ đó biết judge có đáng tin cậy không, ở mức nào thì lệch nhiều, và điều chỉnh rubric/threshold trước khi dùng judge để quyết định ở quy mô lớn (vd gate CI/CD). Nếu không calibrate, một judge bias có thể âm thầm pass/fail sai hàng loạt case mà không ai phát hiện.
 
 ### Exercise 1.3 — Evaluation trong CI/CD
 
@@ -62,13 +66,16 @@ Ba bias thường gặp:
 
 | Metric | Threshold | Lý do |
 |---|---:|---|
-| Faithfulness | | |
-| Answer Relevance | | |
-| Completeness | | |
+| Faithfulness | 0.8 | Hallucination gây thông tin sai trực tiếp cho khách hàng (giá, chính sách hoàn tiền, bảo hành) — rủi ro cao nhất nên cần threshold chặt nhất |
+| Answer Relevance | 0.7 | Answer lạc đề gây trải nghiệm xấu và mất thời gian khách hàng, nhưng ít nguy hiểm hơn hallucination nên threshold thấp hơn một chút |
+| Completeness | 0.65 | Thiếu chi tiết phụ chấp nhận được ở mức độ nhất định, nhưng thiếu bước/điều kiện bắt buộc thì không nên vẫn cần threshold đủ cao để chặn case thiếu thông tin quan trọng |
 
 **Câu 2: Khi nào dùng offline evaluation, online evaluation và human review?**
 
 > *Câu trả lời:*
+> - **Offline evaluation**: chạy trên golden dataset cố định trước khi deploy, dùng để gate CI/CD — phát hiện regression trước khi code lên production, chi phí thấp và lặp lại được.
+> - **Online evaluation**: theo dõi trên real traffic sau khi deploy (A/B test, sampling một phần request thật), dùng để phát hiện drift hoặc các case thực tế không có trong golden dataset mà offline eval không cover được.
+> - **Human review**: dùng khi automated score nằm gần threshold (borderline case), khi phát hiện failure type mới lạ chưa từng thấy, hoặc định kỳ để calibrate lại LLM judge/metrics với nhãn con người — vì automated metrics không thể thay thế hoàn toàn đánh giá con người ở các case nhạy cảm hoặc mơ hồ.
 
 ---
 
